@@ -32,6 +32,8 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/db/ldap_options.h"
 #include "mongo/db/ldap_options_gen.h"
 
+#include <boost/algorithm/string/split.hpp>
+
 #include "mongo/base/status.h"
 #include "mongo/util/options_parser/startup_options.h"
 
@@ -39,7 +41,12 @@ namespace mongo {
 
 Status storeLDAPOptions(const moe::Environment& params) {
     if (params.count("security.ldap.servers")) {
-        ldapGlobalParams.ldapServers = params["security.ldap.servers"].as<std::string>();
+        std::string ldap_servers = params["security.ldap.servers"].as<std::string>();
+        auto guard = *ldapGlobalParams.ldapServers;
+        boost::split(*guard,
+                     ldap_servers,
+                     [](char c) { return c == ','; },
+                     boost::token_compress_on);
     }
     if (params.count("security.ldap.transportSecurity")) {
         ldapGlobalParams.ldapTransportSecurity = params["security.ldap.transportSecurity"].as<std::string>();

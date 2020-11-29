@@ -45,12 +45,22 @@ using namespace fmt::literals;
 LDAPGlobalParams ldapGlobalParams;
 
 std::string LDAPGlobalParams::logString() const {
+    std::string ldap_servers;
+    {
+        auto guard = *ldapServers;
+        std::string pfx;
+        for (auto& s: *guard) {
+            ldap_servers += pfx;
+            ldap_servers += s;
+            pfx = ",";
+        }
+    }
     return fmt::format(
         "ldapServers: {}; "
         "ldapTransportSecurity: {}; "
         "ldapBindMethod: {}; "
         "ldapBindSaslMechanisms: {}",
-        std::string{*ldapServers},
+        ldap_servers,
         ldapTransportSecurity,
         ldapBindMethod,
         ldapBindSaslMechanisms);

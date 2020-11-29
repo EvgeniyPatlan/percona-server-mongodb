@@ -108,15 +108,15 @@ public:
     const_update_guard(const_update_guard const&) = delete;
     const_update_guard& operator=(const_update_guard const&) = delete;
 
-    T& operator*() const noexcept {
+    const T& operator*() const noexcept {
         return _value;
     }
 
-    T* operator->() const noexcept {
+    const T* operator->() const noexcept {
         return &_value;
     }
 
-    operator T() const {
+    operator const T() const {
         return _value;
     }
 

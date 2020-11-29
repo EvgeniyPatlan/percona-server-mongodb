@@ -33,6 +33,7 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 
 #include <atomic>
 #include <string>
+#include <vector>
 
 #include "mongo/base/status.h"
 #include "mongo/util/synchronized_value.h"
@@ -49,7 +50,7 @@ namespace moe = optionenvironment;
 struct LDAPGlobalParams;
 extern LDAPGlobalParams ldapGlobalParams;
 struct LDAPGlobalParams {
-    synchronized_value<std::string> ldapServers;
+    synchronized_value<std::vector<std::string>> ldapServers;
     std::string ldapTransportSecurity;
     std::string ldapBindMethod;
     std::string ldapBindSaslMechanisms;
