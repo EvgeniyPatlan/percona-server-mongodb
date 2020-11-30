@@ -349,7 +349,7 @@ install_deps() {
         yum -y install cyrus-sasl-devel snappy-devel zlib-devel bzip2-devel scons rpmlint
         yum -y install rpm-build git python-pip python-devel libopcodes libcurl-devel rpmlint e2fsprogs-devel expat-devel lz4-devel which
         yum -y install openldap-devel krb5-devel xz-devel
-        pip install --upgrade pip
+        pip install pip==20.2.4
         pip2.7 install --user setuptools --upgrade
         pip3.6 install --user typing pyyaml regex Cheetah3
         pip2.7 install --user typing pyyaml regex Cheetah Cheetah3
@@ -378,7 +378,7 @@ install_deps() {
         source /opt/rh/devtoolset-8/enable
         source /opt/rh/rh-python36/enable
       fi
-      pip install --upgrade pip
+      pip install pip=20.2.4
 
     else
       apt-get -y update
@@ -567,11 +567,11 @@ build_rpm(){
     RHEL=$(rpm --eval %rhel)
     ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
     if [ "x${RHEL}" == "x8" ]; then
-        pip3.6 install --upgrade pip
+        pip3.6 install pip==20.2.4 
         pip3.6 install --user -r etc/pip/dev-requirements.txt
         pip3.6 install --user -r etc/pip/evgtest-requirements.txt
     else
-        pip install --upgrade pip
+        pip install pip==20.2.4
         pip install --user -r etc/pip/dev-requirements.txt
         pip install --user -r etc/pip/evgtest-requirements.txt
     fi
@@ -651,7 +651,7 @@ build_source_deb(){
     #
     mv ${TARFILE} ${PRODUCT}_${VERSION}.orig.tar.gz
     cd ${BUILDDIR}
-    pip install --upgrade pip
+    pip install pip==20.2.4
     pip install -r etc/pip/dev-requirements.txt
     pip install -r etc/pip/evgtest-requirements.txt
 
@@ -703,7 +703,7 @@ build_deb(){
     dpkg-source -x ${DSC}
     #
     cd ${PRODUCT}-${VERSION}
-    pip install --upgrade pip
+    pip install pip==20.2.4
     pip install -r etc/pip/dev-requirements.txt
     pip install -r etc/pip/evgtest-requirements.txt
     #
@@ -804,11 +804,11 @@ build_tarball(){
     # Finally build Percona Server for MongoDB with SCons
     cd ${PSMDIR_ABS}
     if [ "x${RHEL}" == "x8" ]; then
-        pip3.6 install --upgrade pip
+        pip3.6 install pip==20.2.4
         pip3.6 install --user -r etc/pip/dev-requirements.txt
         pip3.6 install --user -r etc/pip/evgtest-requirements.txt
     else
-        pip install --upgrade pip
+        pip install pip==20.2.4
         pip install --user -r etc/pip/dev-requirements.txt
         pip install --user -r etc/pip/evgtest-requirements.txt
     fi
