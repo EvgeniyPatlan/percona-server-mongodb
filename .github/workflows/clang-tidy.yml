@@ -28,7 +28,8 @@ jobs:
   # where the 'opened' event triggers before labels are applied
   check-skip:
     name: Check if workflow should be skipped
-    runs-on: ubuntu-latest
+    runs-on: percona-arc-ubuntu-2404
+    container: ubuntu:latest
     outputs:
       should_skip: ${{ steps.check.outputs.should_skip }}
     steps:
