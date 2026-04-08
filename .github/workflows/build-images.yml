@@ -1,0 +1,204 @@
+name: Build PSMDB Docker Images
+
+on:
+  schedule:
+    # Every night at 3:00 AM UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Comma-separated list of targets (or "all")'
+        required: false
+        default: 'all'
+      push:
+        description: 'Push images to registry'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: evgeniypatlan/psmdb-build
+  PSMDB_BRANCH: release-8.0.20-8
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.set-targets.outputs.targets }}
+    steps:
+      - id: set-targets
+        run: |
+          ALL_TARGETS='["el8","el9","rockylinux8","rockylinux9","almalinux8","almalinux9","oraclelinux8","oraclelinux9","amzn2023","focal","jammy","noble","bullseye","bookworm"]'
+          INPUT="${{ github.event.inputs.targets || 'all' }}"
+          if [ "$INPUT" = "all" ]; then
+            echo "targets=$ALL_TARGETS" >> "$GITHUB_OUTPUT"
+          else
+            TARGETS=$(echo "$INPUT" | jq -R 'split(",") | map(gsub("\\s+";""))' )
+            echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Build x86_64 images on standard runner
+  build-amd64:
+    needs: matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.matrix.outputs.targets) }}
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PSMDB_BRANCH }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push amd64 — ${{ matrix.target }}
+        uses: docker/build-push-action@v6
+        with:
+          context: percona-packaging/docker
+          file: percona-packaging/docker/Dockerfile.${{ matrix.target }}
+          platforms: linux/amd64
+          push: ${{ github.event.inputs.push != 'false' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}:latest-amd64
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}:${{ github.sha }}-amd64
+          build-args: |
+            PSMDB_BRANCH=${{ env.PSMDB_BRANCH }}
+            PSMDB_REPO=https://github.com/${{ github.repository }}.git
+          cache-from: type=gha,scope=${{ matrix.target }}-amd64
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}-amd64
+
+  # Build arm64 images on native ARM runner
+  # Only platforms that have a MongoDB toolchain for aarch64
+  build-arm64:
+    needs: matrix
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ["el8", "el9", "rockylinux8", "rockylinux9", "almalinux8", "almalinux9", "oraclelinux8", "oraclelinux9", "amzn2023", "jammy", "noble"]
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup 2>/dev/null || true
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PSMDB_BRANCH }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push arm64 — ${{ matrix.target }}
+        uses: docker/build-push-action@v6
+        with:
+          context: percona-packaging/docker
+          file: percona-packaging/docker/Dockerfile.${{ matrix.target }}
+          platforms: linux/arm64
+          push: ${{ github.event.inputs.push != 'false' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}:latest-arm64
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}:${{ github.sha }}-arm64
+          build-args: |
+            PSMDB_BRANCH=${{ env.PSMDB_BRANCH }}
+            PSMDB_REPO=https://github.com/${{ github.repository }}.git
+          cache-from: type=gha,scope=${{ matrix.target }}-arm64
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}-arm64
+
+  # Create multi-arch manifest combining amd64 + arm64
+  manifest:
+    needs: [build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    if: ${{ always() && github.event.inputs.push != 'false' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.matrix.outputs.targets) }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest — ${{ matrix.target }}
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target }}"
+          DATE_TAG=$(date +%Y%m%d)
+
+          # Check if arm64 image exists for this target
+          HAS_ARM64=false
+          if docker manifest inspect ${IMAGE}:latest-arm64 >/dev/null 2>&1; then
+            HAS_ARM64=true
+          fi
+
+          if [ "$HAS_ARM64" = "true" ]; then
+            # Multi-arch manifest (amd64 + arm64)
+            docker manifest create ${IMAGE}:latest \
+              ${IMAGE}:latest-amd64 \
+              ${IMAGE}:latest-arm64
+            docker manifest create ${IMAGE}:${DATE_TAG} \
+              ${IMAGE}:latest-amd64 \
+              ${IMAGE}:latest-arm64
+          else
+            # amd64-only manifest
+            docker manifest create ${IMAGE}:latest \
+              ${IMAGE}:latest-amd64
+            docker manifest create ${IMAGE}:${DATE_TAG} \
+              ${IMAGE}:latest-amd64
+          fi
+
+          docker manifest push ${IMAGE}:latest
+          docker manifest push ${IMAGE}:${DATE_TAG}
+
+  summary:
+    needs: [build-amd64, build-arm64, manifest]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Build Summary
+        run: |
+          echo "## PSMDB Build Images — Nightly Build" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Built at: $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Usage" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# Pull multi-arch (auto-selects amd64 or arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-el9:latest" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Pull specific arch" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-el9:latest-amd64" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-el9:latest-arm64" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
