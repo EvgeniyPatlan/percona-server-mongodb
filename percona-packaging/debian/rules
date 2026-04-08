@@ -2,7 +2,6 @@
 #
 export DH_VERBOSE=1
 export DEB_BUILD_HARDENING=1
-export NJOBS=$(shell grep -c processor /proc/cpuinfo)
 export PSM_TARGETS=install-mongod install-mongos install-mongo install-perconadecrypt build/install/bin/mongobridge
 export PSMSRC=$(CURDIR)
 export MONGOTOOLS=bsondump mongostat mongofiles mongoexport mongoimport mongorestore mongodump mongotop
@@ -10,12 +9,12 @@ export INSTALLDIR=/usr/local
 export TOOLS_TAGS=ssl sasl
 export PORTABLE=1
 export USE_SSE=1
-export PATH := /usr/local/go/bin:$(PATH)
+export PATH := /opt/mongodbtoolchain/v4/bin:/usr/local/go/bin:/root/.local/bin:$(PATH)
 export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1 -B/opt/mongodbtoolchain/v4/bin"
 
 $(info GLIBC_TUNABLES is $(GLIBC_TUNABLES))
-CC = gcc-5
-CXX = g++-5
+CC ?= /opt/mongodbtoolchain/v4/bin/gcc
+CXX ?= /opt/mongodbtoolchain/v4/bin/g++
 #
 %:
 	dh $@
@@ -26,15 +25,16 @@ override_dh_builddeb:
 override_dh_auto_clean:
 	dh_auto_clean
 	rm -fr $(PSMSRC)/bin
-	cd $(PSMSRC); \
-	bazel clean --expunge || true
 	rm -rf $(PSMSRC)/bin build resmoke.ini
 	#rm -fr $(INSTALLDIR)
 	rm -fr build resmoke.ini
 	find $(PSMSRC) -name '*.pyc' -delete
 
 percona-server-mongodb:
-	bazel build --config=psmdb_opt_release --define=MONGO_VERSION=$(PSMDB_VERSION) --define=GIT_COMMIT_HASH=$(PSMDB_GIT_HASH) install-dist-test
+	bazel build --config=psmdb_opt_release \
+		$(if $(BAZEL_DISK_CACHE),--disk_cache=$(BAZEL_DISK_CACHE)) \
+		$(if $(BAZEL_REMOTE_CACHE),--remote_cache=$(BAZEL_REMOTE_CACHE) --remote_upload_local_results=true) \
+		--define=MONGO_VERSION=$(PSMDB_VERSION) --define=GIT_COMMIT_HASH=$(PSMDB_GIT_HASH) install-dist-test
 
 compile-mongo-tools:
 	mkdir $(PSMSRC)/bin || true;
@@ -45,10 +45,9 @@ compile-mongo-tools:
         export PATH="/usr/local/go/bin:$(PATH):$(GOPATH)"; \
         export GOBINPATH="/usr/local/go/bin"
 	cd $(PSMSRC)/../src/github.com/mongodb/mongo-tools; \
-        sed -i '14d' buildscript/build.go; \
-        sed -i '226,234d' buildscript/build.go; \
-        sed -i "s:versionStr,:\"$(PSMDB_TOOLS_REVISION)\",:" buildscript/build.go; \
-        sed -i "s:gitCommit):\"$(PSMDB_TOOLS_COMMIT_HASH)\"):" buildscript/build.go; \
+        patch -p0 < $(PSMSRC)/percona-packaging/patches/mongo-tools-build.patch; \
+        sed -i "s:@@PSMDB_TOOLS_REVISION@@:$(PSMDB_TOOLS_REVISION):" buildscript/build.go; \
+        sed -i "s:@@PSMDB_TOOLS_COMMIT_HASH@@:$(PSMDB_TOOLS_COMMIT_HASH):" buildscript/build.go; \
         ./make build;
 	cp -av $(PSMSRC)/../src/github.com/mongodb/mongo-tools/bin/* $(PSMSRC)/bin; \
         cd $(PSMSRC);
@@ -68,6 +67,16 @@ override_dh_auto_install:
 	cp -av debian/percona-server-mongodb-enable-auth.sh debian/percona-server-mongodb-server/usr/bin
 	cp -av debian/mongod.conf debian/percona-server-mongodb-server/etc/mongod.conf
 	cp -av $(PSMSRC)/bin/* debian/percona-server-mongodb-tools/usr/bin
+	# Install pre-separated debug symbols if produced by Bazel (--separate_debug)
+	mkdir -p debian/percona-server-mongodb-dbg/usr/lib/debug/usr/bin
+	for bin in mongod mongos mongo perconadecrypt mongobridge; do \
+		for ext in debug dwp; do \
+			if [ -f bazel-bin/install/bin/$${bin}.$${ext} ]; then \
+				cp -aLv bazel-bin/install/bin/$${bin}.$${ext} \
+					debian/percona-server-mongodb-dbg/usr/lib/debug/usr/bin/; \
+			fi; \
+		done; \
+	done
 
 override_dh_strip:
 	dh_strip -a --dbg-package=percona-server-mongodb-dbg

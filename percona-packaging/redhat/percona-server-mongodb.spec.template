@@ -1,11 +1,17 @@
-%global __brp_strip_args --strip-debug
-%global __find_debuginfo /usr/lib/rpm/find-debuginfo.sh -g
-
-# Disable the addition of mini debuginfo and gdb index options
+# Debug symbols are pre-separated by Bazel (--separate_debug=True, --fission=yes).
+# Binaries arrive already stripped; .debug/.dwp files are packaged separately.
+# Disable RPM's automatic debuginfo subpackage — we declare our own below.
+%global debug_package %{nil}
+%global __debug_package 0
+%global __debug_install_post %{nil}
+# Disable RPM's post-build debug extraction (it would find nothing to do).
+%global __brp_strip %{nil}
+%global __brp_strip_comment %{nil}
+%global __brp_strip_static_archive %{nil}
+%global __brp_strip_args %{nil}
 %global _include_minidebuginfo %{nil}
 %undefine _include_gdb_index
-
-# Optionally disable source extraction to avoid empty debugsourcefiles.list errors
+%global __find_debuginfo %{nil}
 %global __find_debugsource %{nil}
 
 #
@@ -31,7 +37,7 @@ Group:          Applications/Databases
 License:        SSPL
 URL:            https://github.com/percona/percona-server-mongodb.git
 Source0:        @@SOURCE_TARBALL@@
-Source1:        mongod.conf
+Source1:        mongod.conf.rpm
 Source2:        mongod.service
 Source3:        mongod.default
 Source4:        percona-server-mongodb-helper.sh
@@ -131,21 +137,29 @@ Conflicts: Percona-Server-MongoDB-tools Percona-Server-MongoDB-32-tools Percona-
 %description tools
 This package contains various tools from MongoDB project, recompiled for Percona Server for MongoDB
 
+%package debuginfo
+Group:          Development/Debug
+Summary:        Debug symbols for Percona Server for MongoDB
+AutoReqProv:    no
+%description debuginfo
+This package contains debug symbols (.debug) and DWARF packages (.dwp) for
+Percona Server for MongoDB binaries. Install this package to enable debugging
+with gdb or other debuggers.
+
 %prep
 
 %setup -q -n %{src_dir}
-bazel clean --expunge || true
 
 %build
 
-export CC=${CC:-gcc}
-export CXX=${CXX:-g++}
+export PATH=/opt/mongodbtoolchain/v4/bin:/usr/local/go/bin:/root/.local/bin:$PATH
+export CC=${CC:-/opt/mongodbtoolchain/v4/bin/gcc}
+export CXX=${CXX:-/opt/mongodbtoolchain/v4/bin/g++}
 export PSM_TARGETS="install-mongod install-mongos install-mongo install-perconadecrypt build/install/bin/mongobridge"
 export INSTALLDIR=$RPM_BUILD_DIR/install
 export TOOLS_TAGS="ssl sasl"
 export PORTABLE=1
 export USE_SSE=1
-export PATH=/usr/local/go/bin:$PATH
 %if  0%{?amzn} == 2023
 export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1"
 %else
@@ -167,7 +181,16 @@ poetry install --no-root --sync
 poetry env use /opt/mongodbtoolchain/v4/bin/python3
 poetry install --no-root --sync
 %endif
-bazel build --config=psmdb_opt_release --define=MONGO_VERSION=%{version}-@@RELEASE@@ --define=GIT_COMMIT_HASH=@@PSMDB_GIT_HASH@@ install-dist-test
+# BAZEL_DISK_CACHE env var enables local disk cache (mounted from S3 sync by CI pipeline)
+# BAZEL_REMOTE_CACHE env var enables bazel-remote HTTP cache (lazy fetch from S3)
+# Note: --remote_upload_local_results=true overrides the false default in .bazelrc.psmdb
+# so CI pipelines populate the cache; local dev builds keep the read-only behavior.
+bazel build --config=psmdb_opt_release \
+  ${BAZEL_DISK_CACHE:+--disk_cache=$BAZEL_DISK_CACHE} \
+  ${BAZEL_REMOTE_CACHE:+--remote_cache=$BAZEL_REMOTE_CACHE --remote_upload_local_results=true} \
+  --define=MONGO_VERSION=%{version}-@@RELEASE@@ \
+  --define=GIT_COMMIT_HASH=@@PSMDB_GIT_HASH@@ \
+  install-dist-test
 rm -fr resmoke.ini
 popd
 
@@ -188,10 +211,9 @@ mkdir -p $GOPATH/src/github.com/mongodb
 cp -r $RPM_BUILD_DIR/%{src_dir}/mongo-tools ${GOPATH}/src/github.com/mongodb
 pushd ${GOPATH}/src/github.com/mongodb/mongo-tools
 . ./set_tools_revision.sh
-sed -i '14d' buildscript/build.go
-sed -i '226,234d' buildscript/build.go
-sed -i "s:versionStr,:\"$PSMDB_TOOLS_REVISION\",:" buildscript/build.go
-sed -i "s:gitCommit):\"$PSMDB_TOOLS_COMMIT_HASH\"):" buildscript/build.go
+patch -p0 < $RPM_BUILD_DIR/%{src_dir}/percona-packaging/patches/mongo-tools-build.patch
+sed -i "s:@@PSMDB_TOOLS_REVISION@@:${PSMDB_TOOLS_REVISION}:" buildscript/build.go
+sed -i "s:@@PSMDB_TOOLS_COMMIT_HASH@@:${PSMDB_TOOLS_COMMIT_HASH}:" buildscript/build.go
 ./make build
 mv bin/* $RPM_BUILD_DIR/%{src_dir}/bin
 popd
@@ -214,8 +236,6 @@ install -m 750 -d %{buildroot}/%{mongo_home}
 install -m 755 -d %{buildroot}/%{_sysconfdir}/sysconfig
 #
 install -m 644 %{SOURCE1} %{buildroot}/%{_sysconfdir}/mongod.conf
-sed -i 's|/var/lib/mongodb|/var/lib/mongo|' %{buildroot}/%{_sysconfdir}/mongod.conf
-sed -i 's|/var/log/mongodb/mongod.log|/var/log/mongo/mongod.log|' %{buildroot}/%{_sysconfdir}/mongod.conf
 # startup stuff
 %if  0%{?amzn} == 2023 || 0%{?rhel} >= 7
   install -m 755 -d %{buildroot}/%{_unitdir}
@@ -234,6 +254,22 @@ install -m 755 bazel-bin/install/bin/mongod %{buildroot}/%{_bindir}/mongod
 install -m 755 bazel-bin/install/bin/mongos %{buildroot}/%{_bindir}/mongos
 install -m 755 bazel-bin/install/bin/perconadecrypt %{buildroot}/%{_bindir}/
 install -m 755 bazel-bin/install/bin/mongobridge %{buildroot}/%{_bindir}/mongobridge
+
+# Install pre-separated debug symbols (generated by Bazel with --separate_debug)
+install -m 755 -d %{buildroot}/usr/lib/debug%{_bindir}
+for bin in mongod mongos mongo perconadecrypt mongobridge; do
+    for ext in debug dwp; do
+        if [ -f bazel-bin/install/bin/${bin}.${ext} ]; then
+            install -m 644 bazel-bin/install/bin/${bin}.${ext} \
+                %{buildroot}/usr/lib/debug%{_bindir}/${bin}.${ext}
+        fi
+    done
+done
+
+# Check if any debug files were installed
+if ls %{buildroot}/usr/lib/debug%{_bindir}/*.debug 1>/dev/null 2>&1; then
+    touch %{buildroot}/usr/lib/debug%{_bindir}/.debuginfo_present
+fi
 
 install -m 755 $RPM_BUILD_DIR/%{src_dir}/bin/* %{buildroot}/%{_bindir}/
 
@@ -290,6 +326,11 @@ install -m 644 $RPM_BUILD_DIR/%{src_dir}/manpages/* %{buildroot}/%{_mandir}/man1
 %{_mandir}/man1/mongodump.1.gz
 %{_bindir}/mongotop
 %{_mandir}/man1/mongotop.1.gz
+
+%files debuginfo
+%defattr(-,root,root,-)
+%dir /usr/lib/debug%{_bindir}
+/usr/lib/debug%{_bindir}/*
 
 %pre server
 if [ $1 == 1 ]; then
@@ -403,13 +444,11 @@ fi
 %if  0%{?amzn} == 2023 || 0%{?rhel} > 7
 install -d -m 2775 -o mongod -g percona-telemetry /usr/local/percona/telemetry/psmdb
 %endif
-cp %SOURCE999 /tmp/ 2>/dev/null || :
-bash /tmp/call-home.sh -f "PRODUCT_FAMILY_PSMDB" -v "@@VERSION@@-@@RELEASE@@" -d "PACKAGE" &>/dev/null || :
+bash %{SOURCE999} -f "PRODUCT_FAMILY_PSMDB" -v "@@VERSION@@-@@RELEASE@@" -d "PACKAGE" &>/dev/null || :
 %if  0%{?amzn} == 2023 || 0%{?rhel} > 7
 chgrp percona-telemetry /usr/local/percona/telemetry_uuid &>/dev/null || :
 chmod 664 /usr/local/percona/telemetry_uuid &>/dev/null || :
 %endif
-rm -f /tmp/call-home.sh
 
 cat << EOF
 ** Join Percona Squad! **

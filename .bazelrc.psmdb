@@ -3,19 +3,22 @@
 ################################################################################
 common --enable_platform_specific_config=true
 
-# Disable remote execution and remote cache
+# Disable remote execution (remote cache can be enabled via command line)
 common --remote_executor=
 common --experimental_remote_downloader=
-common --remote_cache=
 common --bes_backend=
 common --bes_results_url=
 common --tls_client_certificate=
 common --tls_client_key=
-common --remote_cache_compression=false
-common --remote_upload_local_results=false
-common --grpc_keepalive_time=0s
 common --legacy_important_outputs
 common --//bazel/config:local_build=True
+
+# Caching: remote cache is NOT set here so --remote_cache=grpc://... from
+# command line (CI pipeline) takes effect. For local builds without cache
+# sidecar, Bazel simply skips remote cache (no error).
+common --remote_cache_compression=true
+common --remote_upload_local_results=false
+common --repository_cache=/cache/bazel-repos
 
 # enable additional modules
 common --//bazel/config:use_sasl_client=True

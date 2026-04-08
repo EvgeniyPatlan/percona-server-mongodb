@@ -43,7 +43,7 @@ parse_arguments() {
     fi
 
     for arg do
-        val=$(echo "$arg" | sed -e 's;^--[^=]*=;;')
+        val="${arg#*=}"
         case "$arg" in
             --builddir=*) WORKDIR="$val" ;;
             --build_src_rpm=*) SRPM="$val" ;;
@@ -85,6 +85,18 @@ check_workdir(){
         fi
     fi
     return
+}
+
+download_bazel_configs() {
+    local target_dir=$1
+    local branch=${BRANCH:-master}
+    local base_url="https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${branch}"
+    for f in .bazelignore .bazeliskrc .bazelrc .bazelversion .bazelrc.psmdb .npmrc .prettierignore; do
+        if ! wget -q "${base_url}/${f}" -O "${target_dir}/${f}"; then
+            echo "ERROR: Failed to download ${f} from ${base_url}"
+            return 1
+        fi
+    done
 }
 
 get_sources(){
@@ -154,10 +166,10 @@ get_sources(){
     git clone https://github.com/mongodb/mongo-tools.git
     cd mongo-tools
     git checkout $MONGO_TOOLS_TAG
-    sed -i 's|VersionStr="$(go run release/release.go get-version)"|VersionStr="$PSMDB_TOOLS_REVISION"|' set_goenv.sh
-    sed -i 's|GitCommit="$(git rev-parse HEAD)"|GitCommit="$PSMDB_TOOLS_COMMIT_HASH"|' set_goenv.sh
     echo "export PSMDB_TOOLS_COMMIT_HASH=\"$(git rev-parse HEAD)\"" > set_tools_revision.sh
     echo "export PSMDB_TOOLS_REVISION=\"${PSM_VER}-${PSM_RELEASE}\"" >> set_tools_revision.sh
+    echo 'export VersionStr="$PSMDB_TOOLS_REVISION"' >> set_tools_revision.sh
+    echo 'export GitCommit="$PSMDB_TOOLS_COMMIT_HASH"' >> set_tools_revision.sh
     chmod +x set_tools_revision.sh
     export GOROOT="/usr/local/go/"
     export GOPATH=$PWD/../
@@ -166,7 +178,7 @@ get_sources(){
 
     # Dirty hack for mongo-tools 100.7.3 and aarch64 builds. Should fail once Mongo fixes OS detection https://jira.mongodb.org/browse/TOOLS-3318
     #if [ x"$ARCH" = "xaarch64" ]; then
-        sed -i '/GetLinuxDistroAndVersion()/ s/os, version, err = GetLinuxDistroAndVersion()/os, version, err = "rhel", "9.3", nil/' release/platform/platform.go || exit 1
+        patch -p0 < ../percona-packaging/patches/mongo-tools-platform-detect.patch || exit 1
     #fi
 
     cd ${WORKDIR}
@@ -177,12 +189,18 @@ get_sources(){
 
     cd ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}
     python3 buildscripts/install_bazel.py
-    export PATH=\/root/.local/bin:$PATH >> ~/.bashrc
-    source ~/.bashrc
-    sed -i 's:build-id:build-id=sha1:' SConstruct
-
+    export PATH=/root/.local/bin:$PATH
     cd ../
-    tar --owner=0 --group=0 --exclude=.* -czf ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}.tar.gz ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}
+    download_bazel_configs "${WORKDIR}/${PRODUCT}-${PSM_VER}-${PSM_RELEASE}"
+    # NOTE: do NOT use --exclude=.* — it strips .bazelversion/.bazeliskrc/.bazelrc*
+    # which are required for bazelisk to pick the correct Bazel version. Only exclude
+    # VCS metadata and editor configs.
+    tar --owner=0 --group=0 \
+        --exclude="${PRODUCT}-${PSM_VER}-${PSM_RELEASE}/.git" \
+        --exclude="${PRODUCT}-${PSM_VER}-${PSM_RELEASE}/.github" \
+        --exclude="${PRODUCT}-${PSM_VER}-${PSM_RELEASE}/.gitmodules" \
+        --exclude="${PRODUCT}-${PSM_VER}-${PSM_RELEASE}/.vscode_defaults" \
+        -czf ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}.tar.gz ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}
     echo "UPLOAD=UPLOAD/experimental/BUILDS/${PRODUCT}-8.0/${PRODUCT}-${PSM_VER}-${PSM_RELEASE}/${PSM_BRANCH}/${REVISION}/${BUILD_ID}" >> percona-server-mongodb-80.properties
     mkdir -p $WORKDIR/source_tarball
     mkdir -p $CURDIR/source_tarball
@@ -299,11 +317,6 @@ set_compiler(){
     return
 }
 
-fix_rules(){
-    sed -i 's|CC = gcc-5|CC = /opt/mongodbtoolchain/v4/bin/gcc|' debian/rules
-    sed -i 's|CXX = g++-5|CXX = /opt/mongodbtoolchain/v4/bin/g++|' debian/rules
-    return
-}
 
 install_deps() {
     if [ $INSTALL = 0 ]
@@ -420,7 +433,7 @@ install_deps() {
       if [ x"${DEBIAN}" = "xfocal" ]; then
         INSTALL_LIST="dh-systemd"
       fi
-      INSTALL_LIST="${INSTALL_LIST} git valgrind liblz4-dev devscripts debhelper debconf libpcap-dev libbz2-dev libsnappy-dev pkg-config zlib1g-dev libzlcore-dev libsasl2-dev gcc g++ cmake curl"
+      INSTALL_LIST="${INSTALL_LIST} git valgrind liblz4-dev devscripts debhelper debconf libpcap-dev libbz2-dev libsnappy-dev pkg-config zlib1g-dev libsasl2-dev gcc g++ cmake curl"
       INSTALL_LIST="${INSTALL_LIST} libssl-dev libcurl4-openssl-dev libldap2-dev libkrb5-dev liblzma-dev patchelf libexpat1-dev sudo libfile-copy-recursive-perl"
       until apt-get -y install dirmngr; do
         sleep 1
@@ -442,8 +455,6 @@ install_deps() {
       easy_install pip
       pip install setuptools
     fi
-    #keep symbol table in the binary
-    sed -i 's:$strip, "--remove-section=.comment":$strip, "--strip-debug", "--remove-section=.comment":g' /usr/bin/dh_strip
     return;
 }
 
@@ -501,6 +512,31 @@ get_deb_sources(){
     return
 }
 
+install_python_build_deps() {
+    if [ "x${RHEL}" != "x2023" ]; then
+        export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
+    fi
+    pip install --upgrade pip
+    pip install pyyaml==5.4.1 --no-build-isolation
+    pip install 'referencing<0.30.0' --no-build-isolation
+    pip install 'jsonschema-specifications<=2023.07.1' --no-build-isolation
+    pip install 'poetry==2.0.0' 'pyproject-hooks==1.2.0'
+    pip install 'mongo_tooling_metrics==1.0.8' 'retry' 'psutil' 'Cheetah3'
+    if [ "x${RHEL}" != "x2023" ]; then
+        toolchain_revision=$(tar -ztf /tmp/mongodbtoolchain.tar.gz | head -1 | sed 's/\/$//')
+        /opt/mongodbtoolchain/revisions/${toolchain_revision}/scripts/install.sh
+        poetry env use /opt/mongodbtoolchain/v4/bin/python3
+    fi
+    poetry install --no-root --sync
+}
+
+setup_go_env() {
+    export GOROOT="/usr/local/go/"
+    export GOPATH=${WORKDIR}/
+    export PATH="/usr/local/go/bin:$PATH:$GOPATH"
+    export GOBINPATH="/usr/local/go/bin"
+}
+
 build_srpm(){
     if [ $SRPM = 0 ]
     then
@@ -520,16 +556,6 @@ build_srpm(){
     SRC_DIR=${TARFILE%.tar.gz}
     tar xzf ${WORKDIR}/${TARFILE}
     source ${WORKDIR}/percona-server-mongodb-80.properties
-    cd ${PRODUCT_FULL}
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazelignore
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazeliskrc
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazelrc
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazelversion
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazelrc.psmdb
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.npmrc
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.prettierignore 
-    cd ..
-    tar --owner=0 --group=0 -czf ${PRODUCT_FULL}.tar.gz ${PRODUCT_FULL}
     #
     mkdir -vp rpmbuild/{SOURCES,SPECS,BUILD,SRPMS,RPMS}
     tar xzf ${WORKDIR}/${TARFILE} --wildcards '*/percona-packaging' --strip=1
@@ -537,13 +563,12 @@ build_srpm(){
     #
     wget https://raw.githubusercontent.com/Percona-Lab/telemetry-agent/phase-0/call-home.sh
     mv call-home.sh rpmbuild/SOURCES
-    cp -av percona-packaging/conf/* rpmbuild/SOURCES
+    cp -av percona-packaging/conf/mongod.conf.rpm rpmbuild/SOURCES/mongod.conf.rpm
+    cp -av percona-packaging/conf/percona-server-mongodb-enable-auth.sh rpmbuild/SOURCES/
+    cp -av percona-packaging/conf/mongod.service.rpm rpmbuild/SOURCES/mongod.service
+    cp -av percona-packaging/conf/percona-server-mongodb-helper.sh.rpm rpmbuild/SOURCES/percona-server-mongodb-helper.sh
+    cp -av percona-packaging/conf/mongod.default.rpm rpmbuild/SOURCES/mongod.default
     cp -av percona-packaging/redhat/mongod.* rpmbuild/SOURCES
-    #
-    sed -i 's:@@LOCATION@@:sysconfig:g' rpmbuild/SOURCES/*.service
-    sed -i 's:@@LOCATION@@:sysconfig:g' rpmbuild/SOURCES/percona-server-mongodb-helper.sh
-    sed -i 's:@@LOGDIR@@:mongo:g' rpmbuild/SOURCES/*.default
-    sed -i 's:@@LOGDIR@@:mongo:g' rpmbuild/SOURCES/percona-server-mongodb-helper.sh
     #
     sed -e "s:@@SOURCE_TARBALL@@:$(basename ${TARFILE}):g" \
     -e "s:@@VERSION@@:${VERSION}:g" \
@@ -563,19 +588,6 @@ build_srpm(){
         source /opt/rh/gcc-toolset-11/enable
       fi
     fi
-
-    cd ${WORKDIR}/rpmbuild/SPECS
-    line_number=$(grep -n SOURCE999 percona-server-mongodb.spec | awk -F ':' '{print $1}')
-    cp ../SOURCES/call-home.sh ./
-    awk -v n=$line_number 'NR <= n {print > "part1.txt"} NR > n {print > "part2.txt"}' percona-server-mongodb.spec
-    head -n -1 part1.txt > temp && mv temp part1.txt
-    echo "cat <<'CALLHOME' > /tmp/call-home.sh" >> part1.txt
-    cat call-home.sh >> part1.txt
-    echo "CALLHOME" >> part1.txt
-    cat part2.txt >> part1.txt
-    rm -f call-home.sh part2.txt
-    mv part1.txt percona-server-mongodb.spec
-    cd ${WORKDIR}
 
     rpmbuild -bs --define "_topdir ${WORKDIR}/rpmbuild" --define "dist .generic" rpmbuild/SPECS/$(basename ${SPEC_TMPL%.template})
     mkdir -p ${WORKDIR}/srpm
@@ -622,8 +634,7 @@ build_rpm(){
     tar vxzf ${TARF} --wildcards '*/etc' --strip=1
     tar vxzf ${TARF} --wildcards '*/buildscripts' --strip=1
     python3 buildscripts/install_bazel.py
-    export PATH=\/root/.local/bin:$PATH >> ~/.bashrc
-    source ~/.bashrc
+    export PATH=/root/.local/bin:$PATH
     rm -rf install_bazel.py
     if [ x"$RHEL" = x7 ]; then
       if [ -f /opt/rh/devtoolset-9/enable ]; then
@@ -690,6 +701,10 @@ build_rpm(){
     else
         export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1 -B/opt/mongodbtoolchain/v4/bin"
     fi
+    # Pass BAZEL_DISK_CACHE through to spec %build if set
+    if [ -n "${BAZEL_DISK_CACHE}" ]; then
+        export BAZEL_DISK_CACHE
+    fi
     rpmbuild --define "_topdir ${WORKDIR}/rpmbuild" --define "dist .$OS_NAME" --rebuild rpmbuild/SRPMS/$SRC_RPM
 
     return_code=$?
@@ -725,12 +740,11 @@ build_source_deb(){
     #
     rm -fr ${BUILDDIR}/debian
     cp -av ${BUILDDIR}/percona-packaging/debian ${BUILDDIR}
-    cp -av ${BUILDDIR}/percona-packaging/conf/* ${BUILDDIR}/debian/
-    #
-    sed -i 's:@@LOCATION@@:default:g' ${BUILDDIR}/debian/*.service
-    sed -i 's:@@LOCATION@@:default:g' ${BUILDDIR}/debian/percona-server-mongodb-helper.sh
-    sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/mongod.default
-    sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/percona-server-mongodb-helper.sh
+    cp -av ${BUILDDIR}/percona-packaging/conf/mongod.conf ${BUILDDIR}/debian/
+    cp -av ${BUILDDIR}/percona-packaging/conf/percona-server-mongodb-enable-auth.sh ${BUILDDIR}/debian/
+    cp -av ${BUILDDIR}/percona-packaging/conf/mongod.service.deb ${BUILDDIR}/debian/mongod.service
+    cp -av ${BUILDDIR}/percona-packaging/conf/percona-server-mongodb-helper.sh.deb ${BUILDDIR}/debian/percona-server-mongodb-helper.sh
+    cp -av ${BUILDDIR}/percona-packaging/conf/mongod.default.deb ${BUILDDIR}/debian/mongod.default
     #
     if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xbookworm" -o x"${DEBIAN}" = "xjammy" -o x"${DEBIAN}" = "xnoble" ]; then
         sed -i 's:dh-systemd,::' ${BUILDDIR}/debian/control
@@ -742,25 +756,9 @@ build_source_deb(){
     mv ${TARFILE} ${PRODUCT}_${VERSION}.orig.tar.gz
     cd ${BUILDDIR}
 
-    export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
-    pip install --upgrade pip
-
-    # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724
-    pip install pyyaml==5.4.1 --no-build-isolation
-    pip install 'referencing<0.30.0' --no-build-isolation
-    pip install 'jsonschema-specifications<=2023.07.1' --no-build-isolation
-
-    pip install 'poetry==2.0.0' 'pyproject-hooks==1.2.0'
-    pip install 'mongo_tooling_metrics==1.0.8' 'retry' 'psutil' 'Cheetah3'
-
-    #update toolchain pathes to know about installed poetry
-    toolchain_revision=$(tar -ztf /tmp/mongodbtoolchain.tar.gz | head -1 | sed 's/\/$//')
-    /opt/mongodbtoolchain/revisions/${toolchain_revision}/scripts/install.sh
-    poetry env use /opt/mongodbtoolchain/v4/bin/python3
-    poetry install --no-root --sync
+    install_python_build_deps || { echo "ERROR: Failed to install Python build dependencies"; exit 1; }
 
     set_compiler
-    fix_rules
 
     dch -D unstable --force-distribution -v "${VERSION}-${RELEASE}" "Update to new Percona Server for MongoDB version ${VERSION}"
     dpkg-buildpackage -S
@@ -808,44 +806,19 @@ build_deb(){
     dpkg-source -x ${DSC}
     #
     cd ${PRODUCT}-${VERSION}
-    export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
 
-    pip install --upgrade pip
-
-    # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724
-    pip install pyyaml==5.4.1 --no-build-isolation
-    pip install 'referencing<0.30.0' --no-build-isolation
-    pip install 'jsonschema-specifications<=2023.07.1' --no-build-isolation
-
-    pip install 'poetry==2.0.0' 'pyproject-hooks==1.2.0'
-    pip install 'mongo_tooling_metrics==1.0.8' 'retry' 'psutil' 'Cheetah3'
-
-    #update toolchain pathes to know about installed poetry
-    toolchain_revision=$(tar -ztf /tmp/mongodbtoolchain.tar.gz | head -1 | sed 's/\/$//')
-    /opt/mongodbtoolchain/revisions/${toolchain_revision}/scripts/install.sh
-    poetry env use /opt/mongodbtoolchain/v4/bin/python3
-    poetry install --no-root --sync
+    install_python_build_deps || { echo "ERROR: Failed to install Python build dependencies"; exit 1; }
 
     #
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazelignore
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazeliskrc
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazelrc
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazelversion
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazelrc.psmdb
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.npmrc
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.prettierignore
     python3 buildscripts/install_bazel.py
-    export PATH=\/root/.local/bin:$PATH >> ~/.bashrc
-    source ~/.bashrc
+    export PATH=/root/.local/bin:$PATH
     cp -av percona-packaging/debian/rules debian/
     set_compiler
-    fix_rules
 
     if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xbookworm" -o x"${DEBIAN}" = "xjammy" -o x"${DEBIAN}" = "xnoble" ]; then
         sed -i 's:dh-systemd,::' debian/control
     fi
-    sed -i 's|VersionStr="$(go run release/release.go get-version)"|VersionStr="$PSMDB_TOOLS_REVISION"|' mongo-tools/set_goenv.sh
-    sed -i 's|GitCommit="$(git rev-parse HEAD)"|GitCommit="$PSMDB_TOOLS_COMMIT_HASH"|' mongo-tools/set_goenv.sh
+    # TODO: Replace with proper build flags when mongo-tools supports it
     sed -i 's|go build|go build -a -x|' mongo-tools/build.sh
     sed -i 's|exit $ec||' mongo-tools/build.sh
     . ./mongo-tools/set_tools_revision.sh
@@ -876,6 +849,10 @@ build_deb(){
     export GOPATH=$PWD/../
     export PATH="/usr/local/go/bin:$PATH:$GOPATH"
     export GOBINPATH="/usr/local/go/bin"
+    # Pass BAZEL_DISK_CACHE through to debian/rules if set
+    if [ -n "${BAZEL_DISK_CACHE}" ]; then
+        export BAZEL_DISK_CACHE
+    fi
     dpkg-buildpackage -rfakeroot -us -uc -b
     mkdir -p $CURDIR/deb
     mkdir -p $WORKDIR/deb
@@ -974,25 +951,7 @@ build_tarball(){
 
     # Finally build Percona Server for MongoDB with SCons
     cd ${PSMDIR_ABS}
-    if [ "x${RHEL}" != "x2023" ]; then
-        export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
-        pip install --upgrade pip
-    fi
-    # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724
-    pip install pyyaml==5.4.1 --no-build-isolation
-    pip install 'referencing<0.30.0' --no-build-isolation
-    pip install 'jsonschema-specifications<=2023.07.1' --no-build-isolation
-
-    pip install 'poetry==2.0.0' 'pyproject-hooks==1.2.0'
-    pip install 'mongo_tooling_metrics==1.0.8' 'retry' 'psutil' 'Cheetah3'
-
-    #update toolchain pathes to know about installed poetry
-    if [ "x${RHEL}" != "x2023" ]; then
-    toolchain_revision=$(tar -ztf /tmp/mongodbtoolchain.tar.gz | head -1 | sed 's/\/$//')
-        /opt/mongodbtoolchain/revisions/${toolchain_revision}/scripts/install.sh
-        poetry env use /opt/mongodbtoolchain/v4/bin/python3
-    fi
-    poetry install --no-root --sync
+    install_python_build_deps || { echo "ERROR: Failed to install Python build dependencies"; exit 1; }
 
     export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
     if [ "x${RHEL}" == "x2023" ]; then
@@ -1004,18 +963,12 @@ build_tarball(){
       CURL_LINKFLAGS=$(pkg-config libcurl --static --libs)
       export OPT_LINKFLAGS="${OPT_LINKFLAGS} ${CURL_LINKFLAGS}"
     fi
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazelignore
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazeliskrc
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazelrc
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazelversion
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.bazelrc.psmdb
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.npmrc
-    wget https://raw.githubusercontent.com/percona/percona-server-mongodb/refs/heads/${BRANCH}/.prettierignore
     python3 buildscripts/install_bazel.py
-    export PATH=\/root/.local/bin:$PATH >> ~/.bashrc
-    source ~/.bashrc
-    bazel clean --expunge || true
-    bazel build --config=psmdb_opt_release --define=MONGO_VERSION=${VERSION}-${RELEASE} --define=GIT_COMMIT_HASH=${REVISION_LONG} install-dist-test
+    export PATH=/root/.local/bin:$PATH
+    bazel build --config=psmdb_opt_release \
+      ${BAZEL_DISK_CACHE:+--disk_cache=$BAZEL_DISK_CACHE} \
+      ${BAZEL_REMOTE_CACHE:+--remote_cache=$BAZEL_REMOTE_CACHE --remote_upload_local_results=true} \
+      --define=MONGO_VERSION=${VERSION}-${RELEASE} --define=GIT_COMMIT_HASH=${REVISION_LONG} install-dist-test
     rm -rf .[^.]*
     mkdir -p ${PSMDIR}/bin
     for target in ${PSM_TARGETS[@]}; do
@@ -1029,19 +982,15 @@ build_tarball(){
     #
     # Build mongo tools
     mkdir -p build_tools/src/github.com/mongodb/mongo-tools
-    export GOROOT="/usr/local/go/"
-    export GOPATH=$PWD/
-    export PATH="/usr/local/go/bin:$PATH:$GOPATH"
-    export GOBINPATH="/usr/local/go/bin"
+    setup_go_env || { echo "ERROR: Failed to setup Go environment"; exit 1; }
     mkdir -p $GOPATH/src/github.com/mongodb
     cd $GOPATH/src/github.com/mongodb
     cp -r ${WORKDIR}/${TOOLSDIR} ./
     cd mongo-tools
     . ./set_tools_revision.sh
-    sed -i '14d' buildscript/build.go
-    sed -i '226,234d' buildscript/build.go
-    sed -i "s:versionStr,:\"$PSMDB_TOOLS_REVISION\",:" buildscript/build.go
-    sed -i "s:gitCommit):\"$PSMDB_TOOLS_COMMIT_HASH\"):" buildscript/build.go
+    patch -p0 < ${PSMDIR_ABS}/percona-packaging/patches/mongo-tools-build.patch
+    sed -i "s:@@PSMDB_TOOLS_REVISION@@:${PSMDB_TOOLS_REVISION}:" buildscript/build.go
+    sed -i "s:@@PSMDB_TOOLS_COMMIT_HASH@@:${PSMDB_TOOLS_COMMIT_HASH}:" buildscript/build.go
     ./make build
     # move mongo tools to PSM installation dir
     mv bin/* ${PSMDIR_ABS}/${PSMDIR}/bin

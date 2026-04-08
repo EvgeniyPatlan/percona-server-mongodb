@@ -1,0 +1,122 @@
+###############################################################################
+# PSMDB Build Environment with Bazel Cache
+#
+# Usage:
+#   # Build image (one-time):
+#   docker compose -f docker-compose.build.yml build rpm-builder
+#
+#   # Run RPM build with persistent cache:
+#   docker compose -f docker-compose.build.yml run rpm-builder
+#
+#   # Run DEB build:
+#   docker compose -f docker-compose.build.yml run deb-builder
+#
+#   # Start shared remote cache for CI (optional):
+#   docker compose -f docker-compose.build.yml up -d bazel-cache
+#   # Then set in .bazelrc.psmdb: --remote_cache=grpc://localhost:9092
+###############################################################################
+
+volumes:
+  bazel-cache:
+    name: psmdb-bazel-cache
+
+services:
+  rpm-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile.el9
+    image: psmdb-build:el9
+    volumes:
+      - ../../../:/build/source:ro
+      - /tmp/psmdb-build-rpm:/build/work
+      - bazel-cache:/cache/bazel
+    mem_limit: 16g
+    command: bash -x /build/source/../build-rpm.sh
+
+  rpm-builder-el8:
+    build:
+      context: .
+      dockerfile: Dockerfile.el8
+    image: psmdb-build:el8
+    volumes:
+      - ../../../:/build/source:ro
+      - /tmp/psmdb-build-rpm-el8:/build/work
+      - bazel-cache:/cache/bazel
+    mem_limit: 16g
+    command: bash -x /build/source/../build-rpm.sh
+
+  rpm-builder-amzn2023:
+    build:
+      context: .
+      dockerfile: Dockerfile.amzn2023
+    image: psmdb-build:amzn2023
+    volumes:
+      - ../../../:/build/source:ro
+      - /tmp/psmdb-build-rpm-amzn2023:/build/work
+      - bazel-cache:/cache/bazel
+    mem_limit: 16g
+    command: bash -x /build/source/../build-rpm.sh
+
+  deb-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile.jammy
+    image: psmdb-build:jammy
+    volumes:
+      - ../../../:/build/source:ro
+      - /tmp/psmdb-build-deb:/build/work
+      - bazel-cache:/cache/bazel
+    mem_limit: 16g
+    command: bash -x /build/source/../build-deb.sh
+
+  deb-builder-noble:
+    build:
+      context: .
+      dockerfile: Dockerfile.noble
+    image: psmdb-build:noble
+    volumes:
+      - ../../../:/build/source:ro
+      - /tmp/psmdb-build-deb-noble:/build/work
+      - bazel-cache:/cache/bazel
+    mem_limit: 16g
+    command: bash -x /build/source/../build-deb.sh
+
+  deb-builder-bullseye:
+    build:
+      context: .
+      dockerfile: Dockerfile.bullseye
+    image: psmdb-build:bullseye
+    volumes:
+      - ../../../:/build/source:ro
+      - /tmp/psmdb-build-deb-bullseye:/build/work
+      - bazel-cache:/cache/bazel
+    mem_limit: 16g
+    command: bash -x /build/source/../build-deb.sh
+
+  deb-builder-bookworm:
+    build:
+      context: .
+      dockerfile: Dockerfile.bookworm
+    image: psmdb-build:bookworm
+    volumes:
+      - ../../../:/build/source:ro
+      - /tmp/psmdb-build-deb-bookworm:/build/work
+      - bazel-cache:/cache/bazel
+    mem_limit: 16g
+    command: bash -x /build/source/../build-deb.sh
+
+  # Optional: shared remote cache server for CI/multi-machine builds
+  # Listens on grpc://localhost:9092
+  # Set --remote_cache=grpc://bazel-cache:9092 in .bazelrc.psmdb
+  bazel-cache:
+    image: buchgr/bazel-remote-cache:v2.4.4
+    ports:
+      - "9092:9092"
+      - "9098:8080"
+    volumes:
+      - bazel-cache:/data
+    command: >
+      --max_size=50
+      --dir=/data
+      --grpc_address=0.0.0.0:9092
+      --http_address=0.0.0.0:8080

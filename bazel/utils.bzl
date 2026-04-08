@@ -136,11 +136,19 @@ def get_host_distro_major_version(repository_ctx):
         "Amazon Linux 2": "amazon_linux_2",
         "Amazon Linux 2023": "amazon_linux_2023",
         "Debian GNU/Linux 10": "debian10",
+        "Debian GNU/Linux 11": "debian12",  # Use debian12 toolchain (closest match)
         "Debian GNU/Linux 12": "debian12",
         "Red Hat Enterprise Linux 8*": "rhel8",
         "Red Hat Enterprise Linux 9*": "rhel9",
         "Oracle Linux Server 8*": "rhel8",
         "Oracle Linux Server 9*": "rhel9",
+        "Rocky Linux 8*": "rhel8",
+        "Rocky Linux 9*": "rhel9",
+        "AlmaLinux 8*": "rhel8",
+        "AlmaLinux 9*": "rhel9",
+        "CentOS Linux 8*": "rhel8",
+        "CentOS Stream 8*": "rhel8",
+        "CentOS Stream 9*": "rhel9",
         "SLES 15*": "suse15",
     }
 

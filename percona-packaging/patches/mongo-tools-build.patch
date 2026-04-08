@@ -1,0 +1,29 @@
+--- buildscript/build.go.orig	2026-04-07 11:54:22.549631190 +0300
++++ buildscript/build.go	2026-04-07 11:54:51.688701089 +0300
+@@ -11,7 +11,6 @@
+ 	"regexp"
+ 	"strings"
+ 
+-	"github.com/craiggwilson/goke/pkg/git"
+ 	"github.com/craiggwilson/goke/pkg/sh"
+ 	"github.com/craiggwilson/goke/task"
+ 	"github.com/mongodb/mongo-tools/common/testtype"
+@@ -224,17 +223,8 @@
+ // getLdflags gets the ldflags that should be used when building the
+ // tools on the current platform.
+ func getLdflags(ctx *task.Context) (string, error) {
+-	versionStr, err := runCmd(ctx, "go", "run", "release/release.go", "get-version")
+-	if err != nil {
+-		return "", fmt.Errorf("failed to get current version: %w", err)
+-	}
+-
+-	gitCommit, err := git.SHA1(ctx)
+-	if err != nil {
+-		return "", fmt.Errorf("failed to get git commit hash: %w", err)
+-	}
+ 
+-	ldflags := fmt.Sprintf("-X main.VersionStr=%s -X main.GitCommit=%s", versionStr, gitCommit)
++	ldflags := fmt.Sprintf("-X main.VersionStr=%s -X main.GitCommit=%s", "@@PSMDB_TOOLS_REVISION@@", "@@PSMDB_TOOLS_COMMIT_HASH@@")
+ 
+ 	pf, err := getPlatform()
+ 	if err == nil {

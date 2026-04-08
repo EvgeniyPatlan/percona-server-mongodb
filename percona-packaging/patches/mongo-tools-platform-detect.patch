@@ -1,0 +1,11 @@
+--- release/platform/platform.go.orig
++++ release/platform/platform.go
+@@ -155,7 +155,7 @@
+ 		case "Linux":
+ 			var version string
+
+-			os, version, err = GetLinuxDistroAndVersion()
++			os, version, err = "rhel", "9.3", nil
+ 			if err != nil {
+ 				return Platform{}, fmt.Errorf(
+ 					"detecting local Linux distro/version: %w",

@@ -1,0 +1,101 @@
+FROM almalinux:8
+
+ARG GO_VERSION=1.25.8
+ARG PSMDB_BRANCH=release-8.0.20-8
+ARG PSMDB_REPO=https://github.com/percona/percona-server-mongodb.git
+
+# Enable repos
+RUN dnf install -y 'dnf-command(config-manager)' && \
+    dnf config-manager --set-enabled powertools && \
+    yum -y install epel-release && \
+    yum clean all
+
+# Build dependencies
+RUN yum -y update && \
+    yum -y install \
+      rpm-build rpmlint wget sudo perl git gcc make cmake gcc-c++ \
+      openssl-devel cyrus-sasl-devel snappy-devel zlib-devel bzip2-devel \
+      libpcap-devel openldap-devel xz-devel libcurl-devel \
+      python38 python38-devel python38-pip \
+      redhat-rpm-config which e2fsprogs-devel expat-devel lz4-devel \
+      krb5-devel lld patch patchelf policycoreutils \
+      gcc-toolset-11-dwz gcc-toolset-11-elfutils && \
+    yum -y install mold || true && \
+    yum clean all
+
+# MongoDB toolchain (arch-aware)
+RUN ARCH=$(uname -m) && \
+    cd /tmp && \
+    curl -O https://downloads.percona.com/downloads/packaging/toolchain_installer.tar.gz && \
+    tar -zxf toolchain_installer.tar.gz && \
+    export USER=root && \
+    mkdir -p /opt/mongodbtoolchain/revisions && \
+    bash ./installer.sh --keep-download --download-dir /tmp/ \
+      --download-url https://downloads.percona.com/downloads/packaging/8_mongodbtoolchain_${ARCH}.tar.gz && \
+    rm -f /tmp/toolchain_installer.tar.gz /tmp/installer.sh
+
+ENV PATH=/opt/mongodbtoolchain/v4/bin:$PATH
+
+# Go (arch-aware)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ]; then GO_ARCH=arm64; else GO_ARCH=amd64; fi && \
+    wget -q https://downloads.percona.com/downloads/packaging/go/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz \
+      -O /tmp/go.tar.gz && \
+    tar -xzf /tmp/go.tar.gz -C /usr/local && \
+    rm -f /tmp/go.tar.gz
+
+ENV GOROOT=/usr/local/go
+ENV PATH=$GOROOT/bin:$PATH
+
+# Python build dependencies
+RUN /usr/bin/pip3 install --user typing pyyaml regex Cheetah3 && \
+    pip install --upgrade pip setuptools && \
+    pip install pyyaml==5.4.1 --no-build-isolation && \
+    pip install 'referencing<0.30.0' --no-build-isolation && \
+    pip install 'jsonschema-specifications<=2023.07.1' --no-build-isolation && \
+    pip install 'poetry==2.0.0' 'pyproject-hooks==1.2.0' && \
+    pip install 'mongo_tooling_metrics==1.0.8' 'retry' 'psutil' 'Cheetah3'
+
+# Re-run toolchain install script so poetry is on PATH
+RUN toolchain_revision=$(tar -ztf /tmp/mongodbtoolchain.tar.gz | head -1 | sed 's/\/$//') && \
+    /opt/mongodbtoolchain/revisions/${toolchain_revision}/scripts/install.sh
+
+# Git safe directory (for mounted volumes)
+RUN git config --global --add safe.directory '*'
+
+ENV CC=/opt/mongodbtoolchain/v4/bin/gcc
+ENV CXX=/opt/mongodbtoolchain/v4/bin/g++
+
+###############################################################################
+# Pre-install Bazel + warm dependency cache
+###############################################################################
+
+# Create shared cache directories
+RUN mkdir -p /cache/bazel-repos /cache/bazel
+
+# Clone source to install bazelisk and pre-fetch ALL dependencies
+RUN cd /tmp && \
+    git clone --depth 1 --branch ${PSMDB_BRANCH} ${PSMDB_REPO} psmdb-warmup && \
+    cd psmdb-warmup && \
+    # Install bazelisk binary
+    python3 buildscripts/install_bazel.py && \
+    export PATH=/root/.local/bin:$PATH && \
+    # Fetch all external deps into shared repository cache
+    # This downloads toolchain (~270MB), abseil, zlib, rules_pkg, etc.
+    bazel fetch --repository_cache=/cache/bazel-repos //src/mongo/db:mongod || true && \
+    # Also fetch the full install-dist-test target deps
+    bazel fetch --repository_cache=/cache/bazel-repos //:install-dist-test || true && \
+    # Pre-install poetry deps
+    poetry install --no-root --sync || true && \
+    # Clean build outputs but keep repository cache
+    bazel clean || true && \
+    cd /tmp && rm -rf psmdb-warmup
+
+# Verify cache is populated
+RUN echo "Repository cache size:" && du -sh /cache/bazel-repos/ && \
+    echo "Bazelisk cache size:" && du -sh /root/.cache/bazelisk/ 2>/dev/null || true
+
+# Ensure bazelisk is on PATH
+ENV PATH=/root/.local/bin:$PATH
+
+WORKDIR /build/work
